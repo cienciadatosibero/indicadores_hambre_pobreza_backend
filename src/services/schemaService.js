@@ -86,6 +86,52 @@ async function insertAll(conn, tabla, columnasDef, filas) {
   return insertadas;
 }
 
+// Nombre de la tabla catalogo de entidades/municipios (INEGI).
+const CATALOGO_TABLA = 'catalogo_municipios';
+
+// Todo indicador cargado debe traer CVE_ENT y CVE_MUN y esas claves deben
+// existir en el catalogo geografico, para saber a que lugar pertenece cada dato.
+export async function verificarCatalogoGeografico(columnasDef, filas) {
+  const colEnt = columnasDef.find((c) => c.safe === 'cve_ent');
+  const colMun = columnasDef.find((c) => c.safe === 'cve_mun');
+
+  if (!colEnt || !colMun) {
+    throw new Error(
+      'Los datos deben incluir las columnas CVE_ENT y CVE_MUN: son obligatorias ' +
+      'para vincular cada registro al catalogo de entidades y municipios.'
+    );
+  }
+
+  const faltantes = filas.filter((f) => {
+    const ent = f[colEnt.safe];
+    const mun = f[colMun.safe];
+    return ent === null || ent === undefined || String(ent).trim() === '' ||
+           mun === null || mun === undefined || String(mun).trim() === '';
+  });
+  if (faltantes.length) {
+    throw new Error(
+      `${faltantes.length} fila(s) no tienen CVE_ENT y/o CVE_MUN. Ambos campos son obligatorios en cada registro.`
+    );
+  }
+
+  const clave = (ent, mun) => `${parseInt(ent, 10)}-${parseInt(mun, 10)}`;
+  const paresArchivo = new Set(filas.map((f) => clave(f[colEnt.safe], f[colMun.safe])));
+
+  const [catalogo] = await pool.query(
+    `SELECT cve_ent, cve_mun FROM ${escapeIdent(CATALOGO_TABLA)}`
+  );
+  const paresCatalogo = new Set(catalogo.map((c) => `${c.cve_ent}-${c.cve_mun}`));
+
+  const invalidos = [...paresArchivo].filter((p) => !paresCatalogo.has(p));
+  if (invalidos.length) {
+    throw new Error(
+      `${invalidos.length} combinacion(es) de CVE_ENT/CVE_MUN no existen en el catalogo ` +
+      `de municipios y no pueden referenciarse a ningun lugar: ${invalidos.slice(0, 5).join(', ')}` +
+      `${invalidos.length > 5 ? '...' : ''}`
+    );
+  }
+}
+
 // Logica principal: crear tabla nueva o fusionar con una existente.
 // Devuelve un resumen de la operacion.
 export async function applyUpload({ tabla, columnasDef, filas }) {
@@ -94,6 +140,9 @@ export async function applyUpload({ tabla, columnasDef, filas }) {
   }
   const idCol = columnasDef.find((c) => c.esId);
   if (!idCol) throw new Error('Debes marcar una columna como id (clave primaria)');
+
+  // CVE_ENT y CVE_MUN son obligatorias y deben existir en el catalogo geografico.
+  await verificarCatalogoGeografico(columnasDef, filas);
 
   const conn = await pool.getConnection();
   try {

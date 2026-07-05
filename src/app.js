@@ -7,6 +7,7 @@ import authRoutes from './routes/authRoutes.js';
 import indicadoresRoutes from './routes/indicadoresRoutes.js';
 import analyticsRoutes from './routes/analyticsRoutes.js';
 import contactoRoutes from './routes/contactoRoutes.js';
+import catalogoRoutes from './routes/catalogoRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import { errorHandler, notFound } from './middlewares/errorHandler.js';
 
@@ -24,6 +25,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/indicadores', indicadoresRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/contacto', contactoRoutes);
+app.use('/api/catalogo', catalogoRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.use(notFound);

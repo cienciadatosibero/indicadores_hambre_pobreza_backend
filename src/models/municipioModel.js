@@ -12,7 +12,15 @@ export async function listEntidades() {
   return rows;
 }
 
-// Lista municipios con filtros opcionales (entidad, busqueda) y paginacion.
+// Devuelve el catalogo completo (para descarga como CSV).
+export async function listCatalogoCompleto() {
+  const [rows] = await pool.query(
+    `SELECT cve_ent, nom_ent, cve_mun, nom_mun, cve_geo
+       FROM catalogo_municipios
+      ORDER BY cve_ent ASC, cve_mun ASC`
+  );
+  return rows;
+}
 export async function listMunicipios({ cveEnt, q, limit = 100, offset = 0 } = {}) {
   const where = [];
   const params = [];

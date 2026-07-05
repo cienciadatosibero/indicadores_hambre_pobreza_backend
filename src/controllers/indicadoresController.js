@@ -4,8 +4,10 @@ import {
   getIndicador,
   upsertIndicador,
   getDatosIndicador,
+  getAllRows,
 } from '../models/indicadorModel.js';
 import { buildScale, colorFor, COLOR_SCALE, NO_DATA_COLOR } from '../services/colorService.js';
+import { toCSV } from '../utils/csv.js';
 
 // Lista los indicadores publicos (para el catalogo del sitio).
 export async function listar(req, res, next) {
@@ -53,6 +55,26 @@ export async function datosMapa(req, res, next) {
         },
       },
     });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// Descarga los datos completos de un indicador publico en formato CSV.
+export async function descargar(req, res, next) {
+  try {
+    const ind = await getIndicador(req.params.tabla);
+    if (!ind) return res.status(404).json({ success: false, message: 'Indicador no encontrado' });
+    if (!ind.publico && !req.user) {
+      return res.status(403).json({ success: false, message: 'Indicador no disponible para descarga' });
+    }
+
+    const filas = await getAllRows(ind.nombre_tabla);
+    const csv = toCSV(filas);
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${ind.nombre_tabla}.csv"`);
+    res.send('\uFEFF' + csv);
   } catch (e) {
     next(e);
   }

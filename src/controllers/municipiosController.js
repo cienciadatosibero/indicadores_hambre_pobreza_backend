@@ -1,5 +1,6 @@
 // backend/src/controllers/municipiosController.js
-import { listEntidades, listMunicipios } from '../models/municipioModel.js';
+import { listEntidades, listMunicipios, listCatalogoCompleto } from '../models/municipioModel.js';
+import { toCSV } from '../utils/csv.js';
 
 export async function entidades(req, res, next) {
   try {
@@ -22,6 +23,19 @@ export async function municipios(req, res, next) {
       offset: off,
     });
     res.json({ success: true, data });
+  } catch (e) {
+    next(e);
+  }
+}
+
+// Descarga publica del catalogo completo de entidades y municipios (CSV).
+export async function descargarCatalogo(req, res, next) {
+  try {
+    const filas = await listCatalogoCompleto();
+    const csv = toCSV(filas);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="catalogo_municipios.csv"');
+    res.send('\uFEFF' + csv);
   } catch (e) {
     next(e);
   }
