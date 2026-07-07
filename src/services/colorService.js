@@ -23,6 +23,7 @@ export function colorFor(value, scale) {
   for (let i = 0; i < scale.breaks.length; i++) {
     if (v >= scale.breaks[i]) idx = i + 1;
   }
-  const palette = scale.invertida ? [...COLOR_SCALE].reverse() : COLOR_SCALE;
+  const base = scale.palette && scale.palette.length === 5 ? scale.palette : COLOR_SCALE;
+  const palette = scale.invertida ? [...base].reverse() : base;
   return palette[idx];
 }

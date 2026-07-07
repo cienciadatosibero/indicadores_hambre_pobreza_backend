@@ -1,6 +1,9 @@
 // backend/src/services/schemaService.js
 import { pool } from '../config/db.js';
-import { escapeIdent, isValidIdentifier, resolveSqlType } from '../utils/sqlSafe.js';
+
+// Tablas internas que NUNCA se listan como indicadores ni se pueden borrar.
+export const TABLAS_SISTEMA = ['diccionario_variables', 'estados', 'municipios', 'indicadores', 'usuarios', 'mensajes_contacto'];
+import { escapeIdent, isValidIdentifier, resolveSqlType, ALLOWED_SQL_TYPES } from '../utils/sqlSafe.js';
 
 // Devuelve true si existe la tabla en la base de datos actual.
 export async function tableExists(tabla) {
@@ -50,21 +53,36 @@ function coerce(value, tipo) {
 
 // Crea una nueva tabla dinamica con las columnas y tipos dados.
 // columnasDef: [{ safe, tipo, esId }]
-async function createTable(conn, tabla, columnasDef) {
-  const idCol = columnasDef.find((c) => c.esId);
-  if (!idCol) throw new Error('Debes marcar una columna como id (clave primaria)');
+async function createTable(conn, tabla, columnasDef, idCols) {
+  if (!idCols || !idCols.length) {
+    throw new Error('Debes marcar al menos una columna como id (clave primaria)');
+  }
+  const idSafes = idCols.map((c) => c.safe);
+
+  // MySQL limita el tamaño de fila (~65535 bytes). Con muchas columnas de texto
+  // se rebasa ese limite. Cuando la tabla es "ancha", convertimos las columnas
+  // VARCHAR (salvo las de la clave primaria) a TEXT, que se almacena fuera de la fila.
+  const tablaAncha = columnasDef.length > 40;
 
   const partes = columnasDef.map((c) => {
-    const tipoSql = resolveSqlType(c.tipo);
-    const esPk = c.safe === idCol.safe;
+    const esPk = idSafes.includes(c.safe);
+    let tipoSql = resolveSqlType(c.tipo);
+    // Las columnas de la PK no pueden ser TEXT; el resto de VARCHAR pasan a TEXT si la tabla es ancha.
+    if (tablaAncha && !esPk && String(c.tipo).toUpperCase() === 'VARCHAR') {
+      tipoSql = ALLOWED_SQL_TYPES.TEXT;
+    }
+    // Todas las columnas de la clave primaria deben ser NOT NULL.
     return `${escapeIdent(c.safe)} ${tipoSql}${esPk ? ' NOT NULL' : ''}`;
   });
 
   partes.push('`created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
   partes.push('`updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
-  partes.push(`PRIMARY KEY (${escapeIdent(idCol.safe)})`);
+  const pkCols = idSafes.map((s) => escapeIdent(s)).join(', ');
+  partes.push(`PRIMARY KEY (${pkCols})`);
 
-  const sql = `CREATE TABLE ${escapeIdent(tabla)} (\n  ${partes.join(',\n  ')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
+  const sql =
+    `CREATE TABLE ${escapeIdent(tabla)} (\n  ${partes.join(',\n  ')}\n) ` +
+    `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC`;
   await conn.query(sql);
 }
 
@@ -87,7 +105,7 @@ async function insertAll(conn, tabla, columnasDef, filas) {
 }
 
 // Nombre de la tabla catalogo de entidades/municipios (INEGI).
-const CATALOGO_TABLA = 'catalogo_municipios';
+const CATALOGO_TABLA = 'municipios';
 
 // Todo indicador cargado debe traer CVE_ENT y CVE_MUN y esas claves deben
 // existir en el catalogo geografico, para saber a que lugar pertenece cada dato.
@@ -117,17 +135,32 @@ export async function verificarCatalogoGeografico(columnasDef, filas) {
   const clave = (ent, mun) => `${parseInt(ent, 10)}-${parseInt(mun, 10)}`;
   const paresArchivo = new Set(filas.map((f) => clave(f[colEnt.safe], f[colMun.safe])));
 
+  // Verifica que exista el catalogo antes de consultarlo.
+  const existeCatalogo = await tableExists(CATALOGO_TABLA);
+  if (!existeCatalogo) {
+    throw new Error(
+      `No existe el catalogo de municipios (tabla "${CATALOGO_TABLA}"). ` +
+      'Ejecuta el script BD/catalogo_normalizado_seed.sql antes de cargar indicadores.'
+    );
+  }
+
   const [catalogo] = await pool.query(
     `SELECT cve_ent, cve_mun FROM ${escapeIdent(CATALOGO_TABLA)}`
   );
-  const paresCatalogo = new Set(catalogo.map((c) => `${c.cve_ent}-${c.cve_mun}`));
+  if (!catalogo.length) {
+    throw new Error(
+      `El catalogo de municipios ("${CATALOGO_TABLA}") esta vacio. ` +
+      'Ejecuta el script BD/catalogo_normalizado_seed.sql para poblarlo antes de cargar indicadores.'
+    );
+  }
+  const paresCatalogo = new Set(catalogo.map((c) => `${parseInt(c.cve_ent, 10)}-${parseInt(c.cve_mun, 10)}`));
 
   const invalidos = [...paresArchivo].filter((p) => !paresCatalogo.has(p));
   if (invalidos.length) {
     throw new Error(
       `${invalidos.length} combinacion(es) de CVE_ENT/CVE_MUN no existen en el catalogo ` +
-      `de municipios y no pueden referenciarse a ningun lugar: ${invalidos.slice(0, 5).join(', ')}` +
-      `${invalidos.length > 5 ? '...' : ''}`
+      `de municipios y no pueden referenciarse a ningun lugar. Ejemplos (ent-mun): ` +
+      `${invalidos.slice(0, 8).join(', ')}${invalidos.length > 8 ? '...' : ''}`
     );
   }
 }
@@ -138,8 +171,26 @@ export async function applyUpload({ tabla, columnasDef, filas }) {
   if (!isValidIdentifier(tabla)) {
     throw new Error(`Nombre de tabla invalido: ${tabla}`);
   }
-  const idCol = columnasDef.find((c) => c.esId);
-  if (!idCol) throw new Error('Debes marcar una columna como id (clave primaria)');
+  // Estructura estandar: si el archivo trae CVE_ENT y CVE_MUN pero no cve_geo,
+  // se genera automaticamente cve_geo = ENT(2)+MUN(3) y se usa como clave primaria.
+  const tieneGeo = columnasDef.some((c) => c.safe === 'cve_geo');
+  const colEntDef = columnasDef.find((c) => c.safe === 'cve_ent');
+  const colMunDef = columnasDef.find((c) => c.safe === 'cve_mun');
+  if (!tieneGeo && colEntDef && colMunDef) {
+    for (const f of filas) {
+      const e = String(parseInt(f[colEntDef.safe], 10)).padStart(2, '0');
+      const m = String(parseInt(f[colMunDef.safe], 10)).padStart(3, '0');
+      f.cve_geo = e + m;
+    }
+    columnasDef = columnasDef.map((c) => ({ ...c, esId: false }));
+    columnasDef.unshift({ original: 'cve_geo', safe: 'cve_geo', tipo: 'VARCHAR', esId: true });
+  }
+
+  // Clave primaria: puede ser una o varias columnas (PK compuesta).
+  const idCols = columnasDef.filter((c) => c.esId);
+  if (!idCols.length) {
+    throw new Error('Debes marcar al menos una columna como id (clave primaria)');
+  }
 
   // CVE_ENT y CVE_MUN son obligatorias y deben existir en el catalogo geografico.
   await verificarCatalogoGeografico(columnasDef, filas);
@@ -150,7 +201,7 @@ export async function applyUpload({ tabla, columnasDef, filas }) {
     const existe = await tableExists(tabla);
 
     if (!existe) {
-      await createTable(conn, tabla, columnasDef);
+      await createTable(conn, tabla, columnasDef, idCols);
       const insertadas = await insertAll(conn, tabla, columnasDef, filas);
       await conn.commit();
       return {
@@ -167,10 +218,15 @@ export async function applyUpload({ tabla, columnasDef, filas }) {
     const existentesSet = new Set(existentes);
 
     // 1) Columnas nuevas -> ALTER TABLE ADD COLUMN
+    const totalCols = existentes.length + columnasDef.length;
+    const tablaAncha = totalCols > 40;
     const columnasAgregadas = [];
     for (const c of columnasDef) {
       if (!existentesSet.has(c.safe)) {
-        const tipoSql = resolveSqlType(c.tipo);
+        let tipoSql = resolveSqlType(c.tipo);
+        if (tablaAncha && String(c.tipo).toUpperCase() === 'VARCHAR') {
+          tipoSql = ALLOWED_SQL_TYPES.TEXT;
+        }
         await conn.query(
           `ALTER TABLE ${escapeIdent(tabla)} ADD COLUMN ${escapeIdent(c.safe)} ${tipoSql}`
         );
@@ -179,35 +235,39 @@ export async function applyUpload({ tabla, columnasDef, filas }) {
       }
     }
 
-    // 2) Por fila: si el id existe -> UPDATE de atributos; si no -> INSERT
+    // 2) Por fila: si la clave (una o varias columnas) existe -> UPDATE; si no -> INSERT
     let filasInsertadas = 0;
     let filasActualizadas = 0;
-    const idSafe = idCol.safe;
+    const idSafes = idCols.map((c) => c.safe);
+
+    // Condicion WHERE por clave compuesta: col1 = ? AND col2 = ? ...
+    const whereSql = idCols.map((c) => `${escapeIdent(c.safe)} = ?`).join(' AND ');
 
     for (const fila of filas) {
-      const idValor = coerce(fila[idSafe], idCol.tipo);
-      if (idValor === null) continue;
+      const idValores = idCols.map((c) => coerce(fila[c.safe], c.tipo));
+      // si alguna parte de la clave es nula, se omite la fila
+      if (idValores.some((v) => v === null)) continue;
 
       const [rows] = await conn.query(
-        `SELECT 1 FROM ${escapeIdent(tabla)} WHERE ${escapeIdent(idSafe)} = ? LIMIT 1`,
-        [idValor]
+        `SELECT 1 FROM ${escapeIdent(tabla)} WHERE ${whereSql} LIMIT 1`,
+        idValores
       );
 
       if (rows.length) {
-        // id ya registrado -> solo actualizar atributos (no duplicar fila)
-        const setCols = columnasDef.filter((c) => c.safe !== idSafe);
+        // clave ya registrada -> solo actualizar atributos (no duplicar fila)
+        const setCols = columnasDef.filter((c) => !idSafes.includes(c.safe));
         if (setCols.length) {
           const setSql = setCols.map((c) => `${escapeIdent(c.safe)} = ?`).join(', ');
           const valores = setCols.map((c) => coerce(fila[c.safe], c.tipo));
-          valores.push(idValor);
+          valores.push(...idValores);
           await conn.query(
-            `UPDATE ${escapeIdent(tabla)} SET ${setSql} WHERE ${escapeIdent(idSafe)} = ?`,
+            `UPDATE ${escapeIdent(tabla)} SET ${setSql} WHERE ${whereSql}`,
             valores
           );
           filasActualizadas++;
         }
       } else {
-        // id nuevo -> insertar registro
+        // clave nueva -> insertar registro
         const cols = columnasDef.map((c) => c.safe);
         const colSql = cols.map((c) => escapeIdent(c)).join(', ');
         const placeholders = cols.map(() => '?').join(', ');
@@ -238,7 +298,7 @@ export async function applyUpload({ tabla, columnasDef, filas }) {
 
 // Lista todas las tablas dinamicas (excluye las del sistema).
 export async function listDynamicTables() {
-  const sistema = ['usuarios', 'indicadores', 'mensajes_contacto'];
+  const sistema = TABLAS_SISTEMA;
   const [rows] = await pool.query(
     `SELECT table_name AS nombre, table_rows AS registros
      FROM information_schema.tables
@@ -256,9 +316,11 @@ export async function listDynamicTables() {
 
 export async function dropTable(tabla) {
   if (!isValidIdentifier(tabla)) throw new Error('Nombre de tabla invalido');
-  const sistema = ['usuarios', 'indicadores', 'mensajes_contacto'];
-  if (sistema.includes(tabla)) throw new Error('No se puede eliminar una tabla del sistema');
+  if (TABLAS_SISTEMA.includes(tabla)) throw new Error('No se puede eliminar una tabla del sistema');
   await pool.query(`DROP TABLE IF EXISTS ${escapeIdent(tabla)}`);
   await pool.query(`DELETE FROM indicadores WHERE nombre_tabla = ?`, [tabla]);
+  // Limpia metadatos asociados a la tabla.
+  await pool.query('DELETE FROM diccionario_variables WHERE nombre_tabla = ?', [tabla]);
+  await pool.query('DELETE FROM indicadores WHERE nombre_tabla = ?', [tabla]);
   return { tabla, eliminada: true };
 }

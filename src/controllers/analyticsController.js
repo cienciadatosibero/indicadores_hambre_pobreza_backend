@@ -1,4 +1,5 @@
 // backend/src/controllers/analyticsController.js
+import { getEtiquetas } from '../models/indicadorModel.js';
 import { getAllRows } from '../models/indicadorModel.js';
 import { isValidIdentifier } from '../utils/sqlSafe.js';
 
@@ -53,6 +54,7 @@ export async function analizar(req, res, next) {
         tabla,
         columnas,
         numericas,
+        etiquetas: await getEtiquetas(tabla),
         textuales,
         etiqueta,
         resumen,
