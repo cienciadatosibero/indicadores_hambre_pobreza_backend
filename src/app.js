@@ -15,13 +15,13 @@ dotenv.config();
 
 const app = express();
 
-// CORS: admite varios orígenes separados por coma en CORS_ORIGIN (o '*' para todos)
+// CORS: admite varios origenes separados por coma en CORS_ORIGIN (o '*' para todos)
 const ORIGENES = (process.env.CORS_ORIGIN || '*')
   .split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);              // curl, same-origin, health checks
+    if (!origin) return cb(null, true);
     if (ORIGENES.includes('*')) return cb(null, true);
     const limpio = origin.replace(/\/+$/, '');
     return cb(null, ORIGENES.includes(limpio));

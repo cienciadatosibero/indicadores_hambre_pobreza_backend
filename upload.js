@@ -11,8 +11,9 @@ const uploadDir = process.env.VERCEL
   ? '/tmp/uploads'
   : path.join(__dirname, '..', '..', 'uploads');
 
-// NO se crea la carpeta al importar el módulo (eso tumbaba la función en Vercel
-// antes de setear los headers). Se crea de forma perezosa al subir un archivo.
+// IMPORTANTE: NO se crea la carpeta al importar el módulo (eso tumbaba la función
+// en Vercel antes de setear los headers). Se crea de forma perezosa solo cuando
+// realmente se sube un archivo.
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     try { fs.mkdirSync(uploadDir, { recursive: true }); } catch { /* solo lectura: se ignora */ }
